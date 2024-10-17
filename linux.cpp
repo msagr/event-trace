@@ -11,8 +11,13 @@
 #define PROC_DIR "/proc"
 #define LOG_FILE "app_start_events.log"
 #define MAX_PATH_LENGTH 512
+#define LOG_INTERVAL 10  
 
-// Function to log application events
+typedef struct {
+    int newConnectionsCount;
+    int closedConnectionsCount;
+} ConnectionSummary;
+
 void logEvent(const char *eventDescription) {
     FILE *logFile = fopen(LOG_FILE, "a");
     if (logFile) {
@@ -22,7 +27,6 @@ void logEvent(const char *eventDescription) {
     }
 }
 
-// Function to capture and log command-line arguments of the process
 void getCommandLine(int pid) {
     char path[MAX_PATH_LENGTH];
     snprintf(path, sizeof(path), "%s/%d/cmdline", PROC_DIR, pid);
@@ -39,7 +43,6 @@ void getCommandLine(int pid) {
     }
 }
 
-// Helper function to get current network connections and return them as a dynamically allocated string array
 int getNetworkConnections(int pid, char ***connections) {
     char path[MAX_PATH_LENGTH];
     snprintf(path, sizeof(path), "%s/%d/net/tcp", PROC_DIR, pid);
@@ -66,7 +69,6 @@ int getNetworkConnections(int pid, char ***connections) {
     return count;
 }
 
-// Helper function to free the allocated memory for connections
 void freeNetworkConnections(char **connections, int count) {
     for (int i = 0; i < count; i++) {
         free(connections[i]);
@@ -74,12 +76,11 @@ void freeNetworkConnections(char **connections, int count) {
     free(connections);
 }
 
-// Function to compare the old and new network connection states and log any changes
-void compareAndLogNetworkChanges(char **oldConnections, int oldCount, char **newConnections, int newCount) {
+ConnectionSummary compareAndSummarizeNetworkChanges(char **oldConnections, int oldCount, char **newConnections, int newCount) {
+    ConnectionSummary summary = {0, 0};
     int i, j;
     int found;
 
-    // Check for new connections
     for (i = 0; i < newCount; i++) {
         found = 0;
         for (j = 0; j < oldCount; j++) {
@@ -89,12 +90,10 @@ void compareAndLogNetworkChanges(char **oldConnections, int oldCount, char **new
             }
         }
         if (!found) {
-            logEvent("New Connection Detected:");
-            logEvent(newConnections[i]);
+            summary.newConnectionsCount++;
         }
     }
 
-    // Check for closed connections
     for (i = 0; i < oldCount; i++) {
         found = 0;
         for (j = 0; j < newCount; j++) {
@@ -104,13 +103,13 @@ void compareAndLogNetworkChanges(char **oldConnections, int oldCount, char **new
             }
         }
         if (!found) {
-            logEvent("Connection Closed:");
-            logEvent(oldConnections[i]);
+            summary.closedConnectionsCount++;
         }
     }
+
+    return summary;
 }
 
-// Function to find the PID of the specified application
 int findProcessId(const char *appName) {
     DIR *dir = opendir(PROC_DIR);
     struct dirent *entry;
@@ -138,7 +137,6 @@ int findProcessId(const char *appName) {
     return pid;
 }
 
-// Function to retrieve memory usage of the process
 void getMemoryUsage(int pid, long *vmSize, long *vmRSS) {
     char path[MAX_PATH_LENGTH];
     snprintf(path, sizeof(path), "%s/%d/status", PROC_DIR, pid);
@@ -156,18 +154,30 @@ void getMemoryUsage(int pid, long *vmSize, long *vmRSS) {
     }
 }
 
-// Function to log memory usage
 void logMemoryUsage(long vmSize, long vmRSS) {
     char buffer[256];
     snprintf(buffer, sizeof(buffer), "Memory Usage: VmSize = %ld KB, VmRSS = %ld KB", vmSize, vmRSS);
     logEvent(buffer);
 }
 
-// Function to check if the process is still running
 int isProcessRunning(int pid) {
     char path[MAX_PATH_LENGTH];
     snprintf(path, sizeof(path), "%s/%d", PROC_DIR, pid);
     return access(path, F_OK) == 0; 
+}
+
+void logMemoryFreed(long oldVmSize, long oldVmRSS, long finalVmSize, long finalVmRSS) {
+    char buffer[256];
+    snprintf(buffer, sizeof(buffer), "Memory Freed: VmSize = %ld KB, VmRSS = %ld KB", 
+             oldVmSize - finalVmSize, oldVmRSS - finalVmRSS);
+    logEvent(buffer);
+}
+
+void logNetworkSummary(ConnectionSummary summary) {
+    char buffer[256];
+    snprintf(buffer, sizeof(buffer), "Network Changes: New Connections = %d, Closed Connections = %d",
+             summary.newConnectionsCount, summary.closedConnectionsCount);
+    logEvent(buffer);
 }
 
 int main() {
@@ -198,28 +208,39 @@ int main() {
     getMemoryUsage(pid, &oldVmSize, &oldVmRSS);
     logMemoryUsage(oldVmSize, oldVmRSS);  
 
+    time_t lastLogTime = time(NULL);
+
     while (isProcessRunning(pid)) { 
-        char **newConnections = NULL;
-        int newCount = getNetworkConnections(pid, &newConnections);
+        time_t currentTime = time(NULL);
+        if (difftime(currentTime, lastLogTime) >= LOG_INTERVAL) {
+            char **newConnections = NULL;
+            int newCount = getNetworkConnections(pid, &newConnections);
 
-        compareAndLogNetworkChanges(oldConnections, oldCount, newConnections, newCount);
+            ConnectionSummary summary = compareAndSummarizeNetworkChanges(oldConnections, oldCount, newConnections, newCount);
+            logNetworkSummary(summary);
 
-        freeNetworkConnections(oldConnections, oldCount);
-        oldConnections = newConnections;
-        oldCount = newCount;
+            freeNetworkConnections(oldConnections, oldCount);
+            oldConnections = newConnections;
+            oldCount = newCount;
 
-        long newVmSize = 0, newVmRSS = 0;
-        getMemoryUsage(pid, &newVmSize, &newVmRSS);
-        logMemoryUsage(newVmSize, newVmRSS);
+            long newVmSize = 0, newVmRSS = 0;
+            getMemoryUsage(pid, &newVmSize, &newVmRSS);
+            logMemoryUsage(newVmSize, newVmRSS);
+
+            lastLogTime = currentTime;
+        }
 
         sleep(5);  
     }
 
     logEvent("Process Exit: Application has terminated");
 
-    if (oldConnections) {
-        freeNetworkConnections(oldConnections, oldCount);
-    }
+    long finalVmSize = 0, finalVmRSS = 0;
+        getMemoryUsage(pid, &finalVmSize, &finalVmRSS);
+
+    logMemoryFreed(oldVmSize, oldVmRSS, finalVmSize, finalVmRSS);
+    freeNetworkConnections(oldConnections, oldCount);
 
     return 0;
 }
+
