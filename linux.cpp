@@ -2,8 +2,10 @@
 #include <dirent.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>  
 
 #define PROC_DIR "/proc"
+#define LOG_FILE "process_log.txt"
 
 int isNumeric(const char *str) {
     while (*str) {
@@ -15,10 +17,11 @@ int isNumeric(const char *str) {
     return 1;
 }
 
-void getProcessNameAndStatus(char *pid) {
+void logProcessNameAndStatus(char *pid, FILE *logFile) {
     char path[256];
     char name[256];
     char status[256];
+    char state[32];
     FILE *file;
 
     snprintf(path, sizeof(path), "%s/%s/comm", PROC_DIR, pid);
@@ -26,6 +29,7 @@ void getProcessNameAndStatus(char *pid) {
     if (file) {
         fgets(name, sizeof(name), file);
         fclose(file);
+        name[strcspn(name, "\n")] = 0;
     } else {
         strcpy(name, "Unknown");
     }
@@ -35,35 +39,58 @@ void getProcessNameAndStatus(char *pid) {
     if (file) {
         while (fgets(status, sizeof(status), file)) {
             if (strncmp(status, "State:", 6) == 0) {
+                sscanf(status, "State: %31[^\n]", state);  // Read the state information
                 break;
             }
         }
         fclose(file);
     } else {
-        strcpy(status, "State: Unknown");
+        strcpy(state, "Unknown");
     }
 
-    printf("PID: %s, Name: %s, %s", pid, name, status);
+    fprintf(logFile, "PID: %s, Name: %s, Status: %s\n", pid, name, state);
+}
+
+void clearLogFile() {
+    FILE *logFile = fopen(LOG_FILE, "w");
+    if (logFile) {
+        fprintf(logFile, "Currently running processes (updated in real-time):\n");
+        fprintf(logFile, "-----------------------------------\n");
+        fclose(logFile);
+    }
 }
 
 int main() {
     struct dirent *entry;
-    DIR *dir = opendir(PROC_DIR);
+    DIR *dir;
 
-    if (!dir) {
-        perror("opendir failed");
+    clearLogFile();
+
+    FILE *logFile = fopen(LOG_FILE, "a");
+    if (!logFile) {
+        perror("Failed to open log file");
         return 1;
     }
 
-    printf("Currently running processes:\n");
-    printf("-----------------------------------\n");
-
-    while ((entry = readdir(dir)) != NULL) {
-        if (isNumeric(entry->d_name)) {
-            getProcessNameAndStatus(entry->d_name);
+    while (1) {
+        dir = opendir(PROC_DIR);
+        if (!dir) {
+            perror("opendir failed");
+            fclose(logFile);
+            return 1;
         }
+
+        while ((entry = readdir(dir)) != NULL) {
+            if (isNumeric(entry->d_name)) {
+                logProcessNameAndStatus(entry->d_name, logFile);
+            }
+        }
+
+        closedir(dir);
+        fflush(logFile); 
+        sleep(5);
     }
 
-    closedir(dir);
+    fclose(logFile);
     return 0;
 }
