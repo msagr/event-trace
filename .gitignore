@@ -1,3 +1,6 @@
 linux
 app_events.txt
 process_log.txt
+notes.md
+app_start_events.log
+process_events.log
