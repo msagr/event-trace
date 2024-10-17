@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <ctype.h>
 #include <time.h>
+#include <signal.h>
 
 #define PROC_DIR "/proc"
 #define LOG_FILE "app_start_events.log"
@@ -50,7 +51,6 @@ int getNetworkConnections(int pid, char ***connections) {
     int maxConnections = 100;
     *connections = (char **)malloc(maxConnections * sizeof(char *));
 
-    // Skip the first header line
     fgets(line, sizeof(line), file);
 
     while (fgets(line, sizeof(line), file)) {
@@ -163,8 +163,15 @@ void logMemoryUsage(long vmSize, long vmRSS) {
     logEvent(buffer);
 }
 
+// Function to check if the process is still running
+int isProcessRunning(int pid) {
+    char path[MAX_PATH_LENGTH];
+    snprintf(path, sizeof(path), "%s/%d", PROC_DIR, pid);
+    return access(path, F_OK) == 0; 
+}
+
 int main() {
-    const char *appName = "chrome";  // Specify your application name
+    const char *appName = "chrome";  
     int pid = findProcessId(appName);
 
     if (pid == -1) {
@@ -189,25 +196,29 @@ int main() {
 
     long oldVmSize = 0, oldVmRSS = 0;
     getMemoryUsage(pid, &oldVmSize, &oldVmRSS);
-    logMemoryUsage(oldVmSize, oldVmRSS);  // Log initial memory usage
+    logMemoryUsage(oldVmSize, oldVmRSS);  
 
-    while (1) {
+    while (isProcessRunning(pid)) { 
         char **newConnections = NULL;
         int newCount = getNetworkConnections(pid, &newConnections);
 
         compareAndLogNetworkChanges(oldConnections, oldCount, newConnections, newCount);
 
-        // Free the old connections and replace with the new ones
         freeNetworkConnections(oldConnections, oldCount);
         oldConnections = newConnections;
         oldCount = newCount;
 
-        // Check and log memory usage
         long newVmSize = 0, newVmRSS = 0;
         getMemoryUsage(pid, &newVmSize, &newVmRSS);
         logMemoryUsage(newVmSize, newVmRSS);
 
-        sleep(5);  // Adjust the interval if needed
+        sleep(5);  
+    }
+
+    logEvent("Process Exit: Application has terminated");
+
+    if (oldConnections) {
+        freeNetworkConnections(oldConnections, oldCount);
     }
 
     return 0;
