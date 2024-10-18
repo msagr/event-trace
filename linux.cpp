@@ -14,11 +14,20 @@
 #define MAX_PATH_LENGTH 512
 #define LOG_INTERVAL 10  
 #define MAX_LOG_SIZE (2 * 1024 * 1024)
+#define MAX_PROCESSES 1024
 
 typedef struct {
-    int newConnectionsCount;
-    int closedConnectionsCount;
-} ConnectionSummary;
+    char name[MAX_PATH_LENGTH];
+    int count;
+    int pids[MAX_PROCESSES];
+} ProcessInfo;
+
+const char *targetProcesses[] = {
+    "chrome",  // Name for Chrome
+    "code",    // Name for VS Code
+    "bash"     // Name for Bash
+};
+const int targetProcessCount = sizeof(targetProcesses) / sizeof(targetProcesses[0]);
 
 void logEvent(const char *eventDescription) {
     FILE *logFile = fopen(LOG_FILE, "a");
@@ -53,73 +62,6 @@ void getCommandLine(int pid) {
             token = strtok(NULL, "\0");
         }
     }
-}
-
-int getNetworkConnections(int pid, char ***connections) {
-    char path[MAX_PATH_LENGTH];
-    snprintf(path, sizeof(path), "%s/%d/net/tcp", PROC_DIR, pid);
-    FILE *file = fopen(path, "r");
-    if (!file) return 0;
-
-    char line[256];
-    int count = 0;
-    int maxConnections = 100;
-    *connections = (char **)malloc(maxConnections * sizeof(char *));
-
-    fgets(line, sizeof(line), file);
-
-    while (fgets(line, sizeof(line), file)) {
-        if (count >= maxConnections) {
-            maxConnections *= 2;
-            *connections = (char **)realloc(*connections, maxConnections * sizeof(char *));
-        }
-        (*connections)[count] = strdup(line);  
-        count++;
-    }
-
-    fclose(file);
-    return count;
-}
-
-void freeNetworkConnections(char **connections, int count) {
-    for (int i = 0; i < count; i++) {
-        free(connections[i]);
-    }
-    free(connections);
-}
-
-ConnectionSummary compareAndSummarizeNetworkChanges(char **oldConnections, int oldCount, char **newConnections, int newCount) {
-    ConnectionSummary summary = {0, 0};
-    int i, j;
-    int found;
-
-    for (i = 0; i < newCount; i++) {
-        found = 0;
-        for (j = 0; j < oldCount; j++) {
-            if (strcmp(newConnections[i], oldConnections[j]) == 0) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            summary.newConnectionsCount++;
-        }
-    }
-
-    for (i = 0; i < oldCount; i++) {
-        found = 0;
-        for (j = 0; j < newCount; j++) {
-            if (strcmp(oldConnections[i], newConnections[j]) == 0) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            summary.closedConnectionsCount++;
-        }
-    }
-
-    return summary;
 }
 
 void getMemoryUsage(int pid, long *vmSize, long *vmRSS) {
@@ -158,32 +100,55 @@ void logMemoryFreed(long oldVmSize, long oldVmRSS, long finalVmSize, long finalV
     logEvent(buffer);
 }
 
-void logNetworkSummary(ConnectionSummary summary) {
-    char buffer[256];
-    snprintf(buffer, sizeof(buffer), "Network Changes: New Connections = %d, Closed Connections = %d",
-             summary.newConnectionsCount, summary.closedConnectionsCount);
-    logEvent(buffer);
+int isTargetProcess(const char *name) {
+    for (int i = 0; i < targetProcessCount; i++) {
+        if (strstr(name, targetProcesses[i]) != NULL) {
+            return 1; // Found a target process
+        }
+    }
+    return 0; // Not a target process
 }
 
-int listProcessesAndChoose() {
+int listActiveProcessesAndChoose(ProcessInfo *processes, int *processCount) {
     DIR *dir = opendir(PROC_DIR);
     struct dirent *entry;
-    int count = 0;
-    char processNames[1024][MAX_PATH_LENGTH];
-    int pids[1024];
+    *processCount = 0;
 
     while ((entry = readdir(dir)) != NULL) {
         if (isdigit(entry->d_name[0])) {
+            int pid = atoi(entry->d_name);
+            if (!isProcessRunning(pid)) {
+                continue; // Skip non-running processes
+            }
+
             char processName[MAX_PATH_LENGTH];
             snprintf(processName, sizeof(processName), "%s/%s/comm", PROC_DIR, entry->d_name);
             FILE *file = fopen(processName, "r");
             if (file) {
-                fgets(processName, sizeof(processName), file);
-                processName[strcspn(processName, "\n")] = 0;
-                printf("[%d] %s (PID: %s)\n", count + 1, processName, entry->d_name);
-                strcpy(processNames[count], processName);
-                pids[count] = atoi(entry->d_name);
-                count++;
+                char name[256];
+                fgets(name, sizeof(name), file);
+                name[strcspn(name, "\n")] = 0;
+
+                // Check if the process name is one of the target processes
+                if (isTargetProcess(name)) {
+                    // Check if the process name already exists in the list
+                    int found = 0;
+                    for (int i = 0; i < *processCount; i++) {
+                        if (strcmp(processes[i].name, name) == 0) {
+                            processes[i].pids[processes[i].count++] = pid;
+                            found = 1;
+                            break;
+                        }
+                    }
+
+                    // If not found, create a new entry
+                    if (!found && *processCount < MAX_PROCESSES) {
+                        strcpy(processes[*processCount].name, name);
+                        processes[*processCount].pids[0] = pid;
+                        processes[*processCount].count = 1;
+                        (*processCount)++;
+                    }
+                }
                 fclose(file);
             }
         }
@@ -191,17 +156,23 @@ int listProcessesAndChoose() {
 
     closedir(dir);
 
-    if (count == 0) {
-        printf("No processes found.\n");
+    if (*processCount == 0) {
+        printf("No target active processes found.\n");
         return -1;
+    }
+
+    // Display unique processes with their counts
+    printf("Active Target Processes:\n");
+    for (int i = 0; i < *processCount; i++) {
+        printf("[%d] %s (Processes: %d)\n", i + 1, processes[i].name, processes[i].count);
     }
 
     int choice;
     printf("Choose a process to track (Enter the number): ");
     scanf("%d", &choice);
 
-    if (choice > 0 && choice <= count) {
-        return pids[choice - 1];
+    if (choice > 0 && choice <= *processCount) {
+        return processes[choice - 1].pids[0];  // Return the first PID of the selected process
     } else {
         printf("Invalid choice.\n");
         return -1;
@@ -209,7 +180,10 @@ int listProcessesAndChoose() {
 }
 
 int main() {
-    int pid = listProcessesAndChoose();
+    ProcessInfo processes[MAX_PROCESSES];
+    int processCount = 0;
+
+    int pid = listActiveProcessesAndChoose(processes, &processCount);
 
     if (pid == -1) {
         printf("No valid process selected.\n");
@@ -223,58 +197,28 @@ int main() {
         fclose(logFile);
     }
 
-    logEvent("Process Creation: Application started");
-    logEvent("Initialization: Application is initializing");
-    getCommandLine(pid);
-    logEvent("Event Logging: Application start event logged");
-
-    char **oldConnections = NULL;
-    int oldCount = getNetworkConnections(pid, &oldConnections);
-
     long oldVmSize = 0, oldVmRSS = 0;
     getMemoryUsage(pid, &oldVmSize, &oldVmRSS);
-    logMemoryUsage(oldVmSize, oldVmRSS);  
 
-    time_t lastLogTime = time(NULL);
-
-    while (isProcessRunning(pid)) { 
+    while (isProcessRunning(pid)) {
         checkLogSizeAndTerminate();
-        time_t currentTime = time(NULL);
-        if (difftime(currentTime, lastLogTime) >= LOG_INTERVAL) {
-            char **newConnections = NULL;
-            int newCount = getNetworkConnections(pid, &newConnections);
 
-            ConnectionSummary summary = compareAndSummarizeNetworkChanges(oldConnections, oldCount, newConnections, newCount);
-            logNetworkSummary(summary);
+        // Log command line arguments
+        getCommandLine(pid);
 
-            freeNetworkConnections(oldConnections, oldCount);
-            oldConnections = newConnections;
-            oldCount = newCount;
+        // Get and log memory usage
+        long vmSize, vmRSS;
+        getMemoryUsage(pid, &vmSize, &vmRSS);
+        logMemoryUsage(vmSize, vmRSS);
 
-            long newVmSize = 0, newVmRSS = 0;
-            getMemoryUsage(pid, &newVmSize, &newVmRSS);
-            logMemoryUsage(newVmSize, newVmRSS);
-
-            lastLogTime = currentTime;
-        }
-
-        sleep(5);  
+        // Sleep for a specified interval before the next check
+        sleep(LOG_INTERVAL);
     }
 
-    logEvent("Process Exit: Application has terminated");
-
-    long finalVmSize = 0, finalVmRSS = 0;
+    // After the process exits, log memory freed
+    long finalVmSize, finalVmRSS;
     getMemoryUsage(pid, &finalVmSize, &finalVmRSS);
-
-        logMemoryFreed(oldVmSize, oldVmRSS, finalVmSize, finalVmRSS);
-
-    if (oldConnections) {
-        freeNetworkConnections(oldConnections, oldCount);
-    }
-
-    logEvent("Final Log: Memory freed and connections released.");
-    logEvent("Application Terminated: Logging session complete.");
+    logMemoryFreed(oldVmSize, oldVmRSS, finalVmSize, finalVmRSS);
 
     return 0;
 }
-
